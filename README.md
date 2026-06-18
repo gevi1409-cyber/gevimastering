@@ -34,6 +34,24 @@ python web_app.py
 En Windows abre `iniciar.bat` con doble clic. Se iniciará el servidor local y la
 interfaz se abrirá automáticamente en el navegador. Ningún archivo sale del equipo.
 
+## Distribuir sin instalar Python
+
+El paquete para usuarios finales incluye Python, la interfaz, FFmpeg y FFprobe. Para
+generarlo desde una máquina de desarrollo con Windows y Python 3.14:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+```
+
+El script descarga FFmpeg, crea un entorno aislado con PyInstaller y produce
+`release\GeViMastering-portable.zip`. Si Inno Setup 6 está instalado también genera
+`release\GeViMastering-Setup.exe`. El usuario final sólo necesita descomprimir el ZIP
+y abrir `GeViMastering.exe`, o ejecutar el instalador; no necesita Python ni FFmpeg.
+
+En la versión empaquetada, configuración, historial y caché se guardan en
+`%LOCALAPPDATA%\GeViMastering`, y los masters se exportan por defecto a
+`Documentos\GeViMastering\exports`.
+
 La aplicación no sube audio ni metadata a internet. Los presets se guardan
 localmente dentro de `.suno-mastering/`.
 

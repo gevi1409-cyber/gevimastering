@@ -1,0 +1,8 @@
+GeVi Mastering incluye ejecutables de FFmpeg y FFprobe en sus paquetes para Windows.
+
+FFmpeg es software libre distribuido por el proyecto FFmpeg. La compilación utilizada
+por el proceso de release proviene de https://www.gyan.dev/ffmpeg/builds/ y conserva
+su archivo de licencia dentro de la carpeta licenses del paquete final.
+
+Proyecto FFmpeg: https://ffmpeg.org/
+Código fuente y licencias: https://ffmpeg.org/legal.html

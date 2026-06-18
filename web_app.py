@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -17,15 +18,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
-STATIC = ROOT / "static"
-DATA = ROOT / ".suno-mastering"
+FROZEN = bool(getattr(sys, "frozen", False))
+BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+APP_ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+ROOT = APP_ROOT
+STATIC = BUNDLE_ROOT / "static"
+DATA = Path(os.environ.get("LOCALAPPDATA", APP_ROOT)) / "GeViMastering" if FROZEN else APP_ROOT / ".suno-mastering"
 UPLOADS = DATA / "uploads"
 MEDIA = DATA / "media"
 PRESETS_FILE = DATA / "web-presets.json"
 HISTORY_FILE = DATA / "export-history.json"
 ANALYSIS_CACHE_FILE = DATA / "analysis-cache.json"
-EXPORTS = ROOT / "exports"
+EXPORTS = Path.home() / "Documents" / "GeViMastering" / "exports" if FROZEN else APP_ROOT / "exports"
 FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 DEFAULT_PRESETS = {
     "Plano": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -47,9 +51,9 @@ CACHE_LOCK = threading.Lock()
 
 
 def find_binary(name: str) -> str | None:
-    local = ROOT / "tools" / f"{name}.exe"
-    if local.exists():
-        return str(local)
+    for local in (BUNDLE_ROOT / "tools" / f"{name}.exe", APP_ROOT / "tools" / f"{name}.exe"):
+        if local.exists():
+            return str(local)
     on_path = shutil.which(name)
     if on_path:
         return on_path
@@ -586,9 +590,15 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     DATA.mkdir(exist_ok=True)
     cleanup_temporary_files(max_age_hours=24)
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-    print("GeVi Mastering: http://127.0.0.1:8765")
-    threading.Timer(0.8, lambda: webbrowser.open("http://127.0.0.1:8765")).start()
+    preferred_port = int(os.environ.get("GEVI_PORT", "8765"))
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", preferred_port), Handler)
+    except OSError:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    url = f"http://127.0.0.1:{server.server_port}"
+    print(f"GeVi Mastering: {url}")
+    if os.environ.get("GEVI_NO_BROWSER") != "1":
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
