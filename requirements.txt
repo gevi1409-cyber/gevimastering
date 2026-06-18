@@ -1,0 +1,3 @@
+# La interfaz usa únicamente la biblioteca estándar de Python.
+# FFmpeg es el motor de audio externo requerido.
+

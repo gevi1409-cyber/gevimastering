@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GeVi Mastering</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <div class="eyebrow">ESTUDIO LOCAL</div>
+      <h1>GeVi <span>Mastering</span></h1>
+      <p>Más cuerpo, claridad y volumen. Tu música nunca sale de esta computadora.</p>
+    </div>
+    <div class="engine" id="engineStatus"><i></i> Comprobando motor…</div>
+  </header>
+
+  <main class="workspace">
+    <div class="main-column">
+      <section class="card source-card">
+        <div class="section-title"><div><span>01</span><h2>Tracks y salida</h2></div><p>Carga el álbum completo</p></div>
+        <label class="dropzone compact" id="audioZone">
+          <input type="file" id="audioFile" accept="audio/wav,audio/flac,audio/mpeg,.wav,.flac,.mp3" multiple>
+          <div><b>Canciones</b><span id="audioName">Arrastra o elige varios WAV, FLAC o MP3</span></div><em>Añadir tracks</em>
+        </label>
+        <div class="track-list" id="trackList"><div class="empty-tracks">Los títulos y números de pista aparecerán aquí.</div></div>
+        <div class="output-grid">
+          <label class="field"><span>Carpeta de exportación</span><div class="path-picker"><input id="outputDir" type="text" readonly><button class="ghost" id="chooseOutputDir" type="button">Elegir…</button></div></label>
+          <label class="field"><span>Formato de salida</span><select id="outputFormat"><option value="wav">WAV · 24 bits</option><option value="flac">FLAC · 24 bits</option><option value="mp3">MP3 · 320 kbps</option></select></label>
+        </div>
+        <div class="filename-builder">
+          <div class="filename-options">
+            <span>Nombre del archivo</span>
+            <label><input type="checkbox" id="filePartTrack" checked> Pista</label>
+            <label><input type="checkbox" id="filePartTitle" checked> Título</label>
+            <label><input type="checkbox" id="filePartAlbum"> Álbum</label>
+            <label><input type="checkbox" id="filePartArtist"> Artista</label>
+            <label class="separator-label">Separador <select id="filenameSeparator"><option value=" - "> - </option><option value="_">_</option><option value=" ">espacio</option></select></label>
+          </div>
+          <code id="filenamePreview">01 - Título.wav</code>
+        </div>
+      </section>
+
+      <section class="card eq-card">
+        <div class="section-title"><div><span>02</span><h2>Ecualizador y mastering</h2></div><p>EQ en vivo · −12 a +12 dB</p></div>
+        <div class="preset-row">
+          <label>Preset <select id="presetSelect"></select></label>
+          <button class="ghost" id="savePreset">Guardar como…</button>
+          <button class="icon-button" id="deletePreset" title="Eliminar preset">×</button>
+        </div>
+        <div class="eq-scroll"><div class="eq" id="eq"></div></div>
+        <div class="master-grid">
+          <label class="field"><span>Loudness</span><div class="unit"><input id="targetLufs" type="number" min="-16" max="-7" step="0.5" value="-10"><b>LUFS</b></div></label>
+          <label class="field"><span>True peak</span><div class="unit"><input id="truePeak" type="number" min="-3" max="-0.5" step="0.1" value="-1"><b>dBTP</b></div></label>
+          <label class="field"><span>Inicio A/B</span><div class="unit"><input id="previewStart" type="number" min="0" step="1" value="30"><b>seg</b></div></label>
+          <label class="switch-field"><input id="compression" type="checkbox"><i></i><span><b>Compresión suave</b><small>Control adicional</small></span></label>
+        </div>
+      </section>
+    </div>
+
+    <aside class="side-column">
+      <section class="card metadata-card">
+        <div class="section-title"><div><span>03</span><h2>Datos del álbum</h2></div><p>Se aplican a todos</p></div>
+        <label class="cover-zone" id="coverZone">
+          <input type="file" id="coverFile" accept="image/jpeg,image/png">
+          <img id="coverPreview" alt="Portada">
+          <div><b>Portada</b><span id="coverName">JPG o PNG</span><em>Elegir imagen</em></div>
+        </label>
+        <div class="metadata-grid" id="metadata"></div>
+      </section>
+
+      <section class="card analysis-card">
+        <div class="section-title"><div><span>04</span><h2>Análisis y A/B</h2></div><p>1 minuto</p></div>
+        <div class="meters">
+          <div><span>LUFS</span><b id="meterLufs">—</b></div>
+          <div><span>True peak</span><b id="meterPeak">—</b></div>
+          <div><span>Rango</span><b id="meterRange">—</b></div>
+        </div>
+        <div class="spectrum" id="spectrum">
+          <div class="spectrum-head"><span>Espectro en tiempo real</span><div><i class="original-dot"></i>Original <i class="master-dot"></i>Master</div></div>
+          <canvas id="spectrumCanvas" aria-label="Comparación de frecuencias del original y el master"></canvas>
+        </div>
+        <div class="compare" id="compare">
+          <div class="ab-switch"><button class="active" id="listenOriginal">A · Original</button><button id="listenMaster">B · Master</button></div>
+          <div class="transport">
+            <button class="play-button" id="comparePlay">▶</button>
+            <div class="timeline"><input id="compareSeek" type="range" min="0" max="60" step="0.01" value="0"><div><span id="compareTime">0:00</span><span>1:00</span></div></div>
+          </div>
+          <span class="listening" id="listeningLabel">Escuchando original</span>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <div class="action-bar">
+    <div id="status"><i></i><span>Listo para comenzar</span></div>
+    <div class="actions">
+      <button class="ghost cleanup-button" id="newAlbum">Nuevo álbum / Limpiar</button>
+      <button class="ghost" id="analyze">Analizar</button>
+      <button class="ghost" id="preview">Preparar A/B</button>
+      <button class="primary" id="export">Exportar álbum <span id="exportFormatLabel">WAV</span></button>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
