@@ -10,6 +10,11 @@ editar título/número en una cola y exportar todo el lote ordenado por número 
 La carpeta de destino se elige con el selector nativo de Windows.
 El nombre de cada archivo se construye con las piezas elegidas de la metadata
 (pista, título, álbum y artista) y recuerda la plantilla para futuros álbumes.
+La medición de consistencia compara el loudness de todos los tracks con el promedio
+del álbum después de aplicar el mastering y reutiliza una caché local cuando el audio
+y los ajustes no cambiaron. La exportación valida metadata y nombres, muestra avance
+por track y puede cancelarse sin dejar archivos incompletos. Cada lote terminado queda
+registrado en un historial local con sus archivos, formato y ajustes de mastering.
 
 Los audios cargados y previews son copias temporales: se eliminan automáticamente
 si tienen más de 24 horas, al cerrar correctamente el servidor o al pulsar

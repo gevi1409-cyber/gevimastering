@@ -90,15 +90,30 @@
           <span class="listening" id="listeningLabel">Escuchando original</span>
         </div>
       </section>
+
+      <section class="card consistency-card">
+        <div class="section-title"><div><span>05</span><h2>Consistencia post-master</h2></div><p id="consistencySummary">Sin medir</p></div>
+        <div class="consistency-list" id="consistencyList"><div class="empty-tracks">Procesa una medición para comparar el resultado final.</div></div>
+        <button class="ghost full-button" id="analyzeAlbum">Medir resultado del álbum</button>
+      </section>
+
+      <section class="card history-card">
+        <div class="section-title"><div><span>06</span><h2>Historial</h2></div><p>Últimas exportaciones</p></div>
+        <div class="history-list" id="historyList"><div class="empty-tracks">Todavía no hay exportaciones.</div></div>
+      </section>
     </aside>
   </main>
 
-  <div class="action-bar">
-    <div id="status"><i></i><span>Listo para comenzar</span></div>
+  <div class="action-bar" id="actionBar">
+    <div class="action-state">
+      <div id="status"><i></i><span>Listo para comenzar</span></div>
+      <div class="export-progress" id="exportProgress"><div><span id="exportProgressLabel">Preparando…</span><b id="exportProgressCount">0 / 0</b></div><div class="progress-track"><i id="exportProgressFill"></i></div></div>
+    </div>
     <div class="actions">
       <button class="ghost cleanup-button" id="newAlbum">Nuevo álbum / Limpiar</button>
       <button class="ghost" id="analyze">Analizar</button>
       <button class="ghost" id="preview">Preparar A/B</button>
+      <button class="ghost cancel-button" id="cancelExport">Cancelar exportación</button>
       <button class="primary" id="export">Exportar álbum <span id="exportFormatLabel">WAV</span></button>
     </div>
   </div>

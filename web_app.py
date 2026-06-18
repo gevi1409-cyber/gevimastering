@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import mimetypes
 import os
@@ -22,6 +23,8 @@ DATA = ROOT / ".suno-mastering"
 UPLOADS = DATA / "uploads"
 MEDIA = DATA / "media"
 PRESETS_FILE = DATA / "web-presets.json"
+HISTORY_FILE = DATA / "export-history.json"
+ANALYSIS_CACHE_FILE = DATA / "analysis-cache.json"
 EXPORTS = ROOT / "exports"
 FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 DEFAULT_PRESETS = {
@@ -37,6 +40,10 @@ DEFAULT_PRESETS = {
     "Graves cálidos": [3, 3, 2, 1, 0, 0, 0, 0, 0, 0],
     "Claridad vocal": [0, 0, -1, -1, 0, 1, 2, 2, 1, 0],
 }
+JOB_LOCK = threading.Lock()
+ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
+CANCELLED_JOBS: set[str] = set()
+CACHE_LOCK = threading.Lock()
 
 
 def find_binary(name: str) -> str | None:
@@ -57,13 +64,61 @@ def find_binary(name: str) -> str | None:
 FFMPEG = find_binary("ffmpeg")
 
 
-def run_ffmpeg(args: list[str]) -> subprocess.CompletedProcess[str]:
+def reset_job(job_id: str) -> None:
+    if not job_id:
+        return
+    with JOB_LOCK:
+        CANCELLED_JOBS.discard(job_id)
+
+
+def finish_job(job_id: str) -> None:
+    if not job_id:
+        return
+    with JOB_LOCK:
+        ACTIVE_PROCESSES.pop(job_id, None)
+        CANCELLED_JOBS.discard(job_id)
+
+
+def cancel_job(job_id: str) -> bool:
+    if not job_id:
+        return False
+    with JOB_LOCK:
+        CANCELLED_JOBS.add(job_id)
+        process = ACTIVE_PROCESSES.get(job_id)
+    if process and process.poll() is None:
+        try:
+            process.terminate()
+            return True
+        except OSError:
+            return False
+    return False
+
+
+def run_ffmpeg(args: list[str], job_id: str = "") -> subprocess.CompletedProcess[str]:
     if not FFMPEG:
         raise RuntimeError("No se encontró FFmpeg. Instálalo o colócalo en tools/ffmpeg.exe.")
-    result = subprocess.run(
-        [FFMPEG, "-hide_banner", "-y", *args], capture_output=True, text=True,
-        encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW,
+    with JOB_LOCK:
+        if job_id and job_id in CANCELLED_JOBS:
+            raise RuntimeError("Exportación cancelada.")
+    process = subprocess.Popen(
+        [FFMPEG, "-hide_banner", "-y", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW,
     )
+    if job_id:
+        with JOB_LOCK:
+            ACTIVE_PROCESSES[job_id] = process
+            cancelled = job_id in CANCELLED_JOBS
+        if cancelled:
+            process.terminate()
+    stdout, stderr = process.communicate()
+    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    if job_id:
+        with JOB_LOCK:
+            if ACTIVE_PROCESSES.get(job_id) is process:
+                ACTIVE_PROCESSES.pop(job_id, None)
+            cancelled = job_id in CANCELLED_JOBS
+        if cancelled:
+            raise RuntimeError("Exportación cancelada.")
     if result.returncode:
         raise RuntimeError("FFmpeg no pudo completar el proceso:\n" + "\n".join(result.stderr.splitlines()[-12:]))
     return result
@@ -85,6 +140,72 @@ def save_presets(presets: dict[str, list[float]]) -> None:
     PRESETS_FILE.write_text(json.dumps(custom, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_history() -> list[dict]:
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def add_history_entry(entry: dict) -> list[dict]:
+    history = load_history()
+    clean = {
+        "created_at": str(entry.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z")),
+        "album": str(entry.get("album", "")).strip(),
+        "artist": str(entry.get("artist", "")).strip(),
+        "format": str(entry.get("format", "")).lower(),
+        "tracks": max(0, int(entry.get("tracks", 0))),
+        "output_dir": str(entry.get("output_dir", "")),
+        "outputs": [str(item) for item in entry.get("outputs", [])][:200],
+        "settings": entry.get("settings", {}),
+    }
+    history.insert(0, clean)
+    history = history[:50]
+    DATA.mkdir(exist_ok=True)
+    HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    return history
+
+
+def load_analysis_cache() -> dict:
+    if not ANALYSIS_CACHE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(ANALYSIS_CACHE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def analysis_cache_key(audio: Path, operation: str, options: dict) -> str:
+    stat = audio.stat()
+    payload = {
+        "path": str(audio.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+        "operation": operation, "options": options,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def cached_analysis(audio: Path, operation: str, options: dict) -> dict | None:
+    key = analysis_cache_key(audio, operation, options)
+    with CACHE_LOCK:
+        value = load_analysis_cache().get(key)
+    return value if isinstance(value, dict) else None
+
+
+def save_cached_analysis(audio: Path, operation: str, options: dict, value: dict) -> None:
+    key = analysis_cache_key(audio, operation, options)
+    with CACHE_LOCK:
+        cache = load_analysis_cache()
+        cache[key] = value
+        if len(cache) > 500:
+            cache = dict(list(cache.items())[-500:])
+        DATA.mkdir(exist_ok=True)
+        ANALYSIS_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+
 def processing_filter(settings: dict) -> str:
     filters: list[str] = []
     preamp = float(settings.get("preamp", 0))
@@ -100,14 +221,24 @@ def processing_filter(settings: dict) -> str:
     return ",".join(filters)
 
 
-def loudness_data(audio: Path, processing: str = "", target: float = -14, peak: float = -1) -> dict:
+def loudness_data(audio: Path, processing: str = "", target: float = -14, peak: float = -1, job_id: str = "") -> dict:
     norm = f"loudnorm=I={target:.1f}:LRA=11:TP={peak:.1f}:print_format=json"
     audio_filter = ",".join(filter(None, [processing, norm]))
-    result = run_ffmpeg(["-i", str(audio), "-af", audio_filter, "-f", "null", "NUL"])
+    result = run_ffmpeg(["-i", str(audio), "-af", audio_filter, "-f", "null", "NUL"], job_id)
     blocks = re.findall(r"\{[\s\S]*?\}", result.stderr)
     if not blocks:
         raise RuntimeError("No se pudieron medir los niveles del audio.")
     return json.loads(blocks[-1])
+
+
+def cached_loudness_data(audio: Path, processing: str = "", target: float = -14, peak: float = -1, job_id: str = "") -> dict:
+    options = {"processing": processing, "target": target, "peak": peak}
+    cached = cached_analysis(audio, "loudness", options)
+    if cached is not None:
+        return cached
+    result = loudness_data(audio, processing, target, peak, job_id)
+    save_cached_analysis(audio, "loudness", options, result)
+    return result
 
 
 def metadata_args(metadata: dict) -> list[str]:
@@ -185,11 +316,11 @@ def select_output_directory(initial: str = "") -> str:
         root.destroy()
 
 
-def second_pass_filter(audio: Path, settings: dict) -> str:
+def second_pass_filter(audio: Path, settings: dict, job_id: str = "") -> str:
     target = float(settings.get("target_lufs", -10))
     peak = float(settings.get("true_peak", -1))
     process = processing_filter(settings)
-    levels = loudness_data(audio, process, target, peak)
+    levels = cached_loudness_data(audio, process, target, peak, job_id)
     normalize = (
         f"loudnorm=I={target:.1f}:LRA=11:TP={peak:.1f}"
         f":measured_I={levels['input_i']}:measured_TP={levels['input_tp']}"
@@ -197,6 +328,21 @@ def second_pass_filter(audio: Path, settings: dict) -> str:
         f":offset={levels['target_offset']}:linear=true:print_format=summary"
     )
     return ",".join(filter(None, [process, normalize]))
+
+
+def mastered_loudness_data(audio: Path, settings: dict) -> dict:
+    relevant = {key: settings.get(key) for key in ("preamp", "eq", "target_lufs", "true_peak", "compression")}
+    options = {"settings": relevant}
+    cached = cached_analysis(audio, "mastered-loudness", options)
+    if cached is not None:
+        return cached
+    with tempfile.TemporaryDirectory(prefix="gevi-analysis-") as temporary:
+        master = Path(temporary) / "master.wav"
+        final_filter = second_pass_filter(audio, settings)
+        run_ffmpeg(["-i", str(audio), "-map_metadata", "-1", "-af", final_filter, "-ar", "48000", "-c:a", "pcm_s24le", str(master)])
+        result = loudness_data(master)
+    save_cached_analysis(audio, "mastered-loudness", options, result)
+    return result
 
 
 def make_preview(audio: Path, settings: dict) -> tuple[Path, Path]:
@@ -215,31 +361,37 @@ def make_preview(audio: Path, settings: dict) -> tuple[Path, Path]:
     return original, mastered
 
 
-def export_audio(audio: Path, cover: Path | None, settings: dict, metadata: dict, output_dir: Path, output_format: str, output_stem: str = "") -> Path:
+def safe_output_stem(value: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]+', "_", value).strip(" .") or "master"
+
+
+def export_audio(audio: Path, cover: Path | None, settings: dict, metadata: dict, output_dir: Path, output_format: str, output_stem: str = "", job_id: str = "") -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_format = output_format.lower()
     if output_format not in {"wav", "flac", "mp3"}:
         raise ValueError("El formato de salida debe ser WAV, FLAC o MP3.")
     title = str(metadata.get("title", "")).strip() or audio.stem
-    safe = re.sub(r'[<>:"/\\|?*]+', "_", output_stem or title).strip(" .") or "master"
-    final_filter = second_pass_filter(audio, settings)
+    safe = safe_output_stem(output_stem or title)
+    final_filter = second_pass_filter(audio, settings, job_id)
     tags = metadata_args(metadata)
     output = output_dir / f"{safe}.{output_format}"
 
     with tempfile.TemporaryDirectory(prefix="suno-mastering-") as temporary:
         master = Path(temporary) / "master.wav"
-        run_ffmpeg(["-i", str(audio), "-map_metadata", "-1", "-af", final_filter, "-ar", "48000", "-c:a", "pcm_s24le", str(master)])
+        encoded = Path(temporary) / f"output.{output_format}"
+        run_ffmpeg(["-i", str(audio), "-map_metadata", "-1", "-af", final_filter, "-ar", "48000", "-c:a", "pcm_s24le", str(master)], job_id)
         if output_format == "wav":
-            run_ffmpeg(["-i", str(master), "-map_metadata", "-1", *tags, "-ar", "48000", "-c:a", "pcm_s24le", str(output)])
+            run_ffmpeg(["-i", str(master), "-map_metadata", "-1", *tags, "-ar", "48000", "-c:a", "pcm_s24le", str(encoded)], job_id)
         else:
             command = ["-i", str(master)]
             if cover and cover.is_file():
                 command += ["-i", str(cover), "-map", "0:a", "-map", "1:v", "-disposition:v", "attached_pic", "-metadata:s:v", "title=Album cover"]
             if output_format == "flac":
-                command += ["-map_metadata", "-1", *tags, "-ar", "48000", "-c:a", "flac", "-sample_fmt", "s32", "-compression_level", "8", "-c:v", "copy", str(output)]
+                command += ["-map_metadata", "-1", *tags, "-ar", "48000", "-c:a", "flac", "-sample_fmt", "s32", "-compression_level", "8", "-c:v", "copy", str(encoded)]
             else:
-                command += ["-map_metadata", "-1", *tags, "-ar", "48000", "-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3", "-c:v", "copy", str(output)]
-            run_ffmpeg(command)
+                command += ["-map_metadata", "-1", *tags, "-ar", "48000", "-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3", "-c:v", "copy", str(encoded)]
+            run_ffmpeg(command, job_id)
+        encoded.replace(output)
     return output
 
 
@@ -264,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/state":
-            self.send_json({"presets": load_presets(), "output_dir": str(EXPORTS), "ffmpeg": bool(FFMPEG), "temporary": temporary_storage_info()})
+            self.send_json({"presets": load_presets(), "history": load_history(), "output_dir": str(EXPORTS), "ffmpeg": bool(FFMPEG), "temporary": temporary_storage_info()})
             return
         if parsed.path.startswith("/media/"):
             self.serve_file(MEDIA / Path(parsed.path).name)
@@ -317,8 +469,71 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/analyze":
                 body = self.read_json()
-                data = loudness_data(Path(body["audio_path"]))
+                data = cached_loudness_data(Path(body["audio_path"]))
                 self.send_json({"ok": True, "analysis": data})
+                return
+            if parsed.path == "/api/analyze-album":
+                body = self.read_json()
+                tracks = body.get("tracks", [])
+                settings = body.get("settings", {})
+                if not tracks:
+                    raise ValueError("Añade al menos una canción para medir el álbum.")
+                results = []
+                for track in tracks[:200]:
+                    levels = mastered_loudness_data(Path(track["path"]), settings)
+                    results.append({
+                        "id": str(track.get("id", "")),
+                        "title": str(track.get("title", "")),
+                        "track": int(track.get("track", 0)),
+                        "lufs": float(levels["input_i"]),
+                        "true_peak": float(levels["input_tp"]),
+                        "lra": float(levels["input_lra"]),
+                    })
+                center = sum(item["lufs"] for item in results) / len(results)
+                for item in results:
+                    item["difference"] = round(item["lufs"] - center, 1)
+                spread = max(item["lufs"] for item in results) - min(item["lufs"] for item in results)
+                self.send_json({"ok": True, "tracks": results, "average_lufs": round(center, 1), "spread": round(spread, 1), "mode": "post-master"})
+                return
+            if parsed.path == "/api/cancel-export":
+                body = self.read_json()
+                job_id = str(body.get("job_id", ""))
+                active = cancel_job(job_id)
+                self.send_json({"ok": True, "cancelled": True, "active_process_stopped": active})
+                return
+            if parsed.path == "/api/start-export-job":
+                body = self.read_json()
+                reset_job(str(body.get("job_id", "")))
+                self.send_json({"ok": True})
+                return
+            if parsed.path == "/api/finish-export-job":
+                body = self.read_json()
+                finish_job(str(body.get("job_id", "")))
+                self.send_json({"ok": True})
+                return
+            if parsed.path == "/api/preflight":
+                body = self.read_json()
+                output_dir = Path(body.get("output_dir") or EXPORTS)
+                output_format = str(body.get("output_format", "wav")).lower()
+                if output_format not in {"wav", "flac", "mp3"}:
+                    raise ValueError("Formato de salida inválido.")
+                existing = []
+                duplicates = []
+                seen: set[str] = set()
+                for stem in body.get("stems", [])[:200]:
+                    candidate = output_dir / f"{safe_output_stem(str(stem))}.{output_format}"
+                    normalized = str(candidate).casefold()
+                    if normalized in seen:
+                        duplicates.append(str(candidate))
+                    seen.add(normalized)
+                    if candidate.exists():
+                        existing.append(str(candidate))
+                self.send_json({"ok": True, "existing": existing, "duplicates": duplicates})
+                return
+            if parsed.path == "/api/history":
+                body = self.read_json()
+                history = add_history_entry(body)
+                self.send_json({"ok": True, "history": history})
                 return
             if parsed.path == "/api/select-output-dir":
                 body = self.read_json()
@@ -333,8 +548,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/export":
                 body = self.read_json()
+                job_id = str(body.get("job_id", ""))
                 cover = Path(body["cover_path"]) if body.get("cover_path") else None
-                output = export_audio(Path(body["audio_path"]), cover, body["settings"], body["metadata"], Path(body.get("output_dir") or EXPORTS), body.get("output_format", "wav"), str(body.get("output_stem", "")))
+                output = export_audio(Path(body["audio_path"]), cover, body["settings"], body["metadata"], Path(body.get("output_dir") or EXPORTS), body.get("output_format", "wav"), str(body.get("output_stem", "")), job_id)
                 self.send_json({"ok": True, "output": str(output)})
                 return
             if parsed.path == "/api/presets":
