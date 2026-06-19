@@ -37,9 +37,10 @@ if (!(Test-Path (Join-Path $venv 'Scripts\python.exe'))) {
 }
 $python = Join-Path $venv 'Scripts\python.exe'
 & $python -m pip install --disable-pip-version-check -r (Join-Path $root 'requirements-build.txt')
+if ($LASTEXITCODE -ne 0) { throw 'No se pudieron instalar las dependencias de compilación.' }
 
-$distRoot = Join-Path $build 'dist'
-$workRoot = Join-Path $build 'work'
+$distRoot = Join-Path $build "dist-$PID"
+$workRoot = Join-Path $build "work-$PID"
 $specRoot = Join-Path $build 'spec'
 & $python -m PyInstaller `
     --noconfirm --clean --onedir --windowed --noupx `
@@ -49,7 +50,9 @@ $specRoot = Join-Path $build 'spec'
     --add-binary "$ffmpeg;tools" `
     --add-binary "$ffprobe;tools" `
     --hidden-import tkinter --hidden-import tkinter.filedialog `
+    --collect-all webview `
     (Join-Path $root 'web_app.py')
+if ($LASTEXITCODE -ne 0) { throw 'PyInstaller no pudo generar la aplicación.' }
 
 $appDir = Join-Path $distRoot 'GeViMastering'
 Copy-Item (Join-Path $root 'README.md') $appDir -Force
@@ -60,8 +63,18 @@ if (Test-Path (Join-Path $build 'FFmpeg-LICENSE.txt')) {
 }
 
 $portable = Join-Path $release 'GeViMastering-portable.zip'
-if (Test-Path $portable) { Remove-Item $portable -Force }
-Compress-Archive -Path "$appDir\*" -DestinationPath $portable -CompressionLevel Optimal
+$compressed = $false
+for ($attempt = 1; $attempt -le 5 -and !$compressed; $attempt++) {
+    if (Test-Path $portable) { Remove-Item $portable -Force }
+    & tar.exe -a -c -f $portable -C $appDir .
+    if ($LASTEXITCODE -eq 0) {
+        $compressed = $true
+    } else {
+        if ($attempt -eq 5) { throw 'No se pudo crear el ZIP portable.' }
+        Write-Warning "El sistema mantiene archivos del build ocupados; reintento $attempt de 5..."
+        Start-Sleep -Seconds 5
+    }
+}
 Write-Host "Portable creado: $portable"
 
 if (!$SkipInstaller) {
@@ -73,6 +86,7 @@ if (!$SkipInstaller) {
     }
     if ($iscc) {
         & $iscc.Source "/DSourceDir=$appDir" "/DOutputDir=$release" (Join-Path $root 'packaging\GeViMastering.iss')
+        if ($LASTEXITCODE -ne 0) { throw 'Inno Setup no pudo generar el instalador.' }
     } else {
         Write-Warning 'Inno Setup no está instalado; se omitió Setup.exe. El ZIP portable sí está listo.'
     }

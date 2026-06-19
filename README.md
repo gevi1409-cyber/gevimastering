@@ -5,6 +5,10 @@ formato seleccionado: WAV, FLAC o MP3. Incluye comparación A/B sincronizada de 
 minuto, ecualizador manual de 10 bandas, presets, objetivo de loudness y metadata
 esencial: título, artista, álbum, número de pista, año, portada y género.
 
+Los presets guardan la cadena completa: preamp, EQ, objetivo LUFS, true peak,
+compresión, punto de inicio A/B y plantilla del nombre de archivo. Los presets
+antiguos que sólo contienen las 10 bandas se migran automáticamente al cargarse.
+
 El flujo de álbum permite cargar varios tracks, reutilizar portada y datos comunes,
 editar título/número en una cola y exportar todo el lote ordenado por número de pista.
 La carpeta de destino se elige con el selector nativo de Windows.
@@ -16,9 +20,13 @@ y los ajustes no cambiaron. La exportación valida metadata y nombres, muestra a
 por track y puede cancelarse sin dejar archivos incompletos. Cada lote terminado queda
 registrado en un historial local con sus archivos, formato y ajustes de mastering.
 
-Los audios cargados y previews son copias temporales: se eliminan automáticamente
-si tienen más de 24 horas, al cerrar correctamente el servidor o al pulsar
-`Nuevo álbum / Limpiar`. Esta rutina nunca recorre `exports/` ni borra presets.
+La sesión se guarda automáticamente y recupera tracks, portada, metadata, mastering
+y salida al volver a abrir la aplicación. El historial permite ver los archivos,
+abrir su carpeta y restaurar los ajustes de una entrega.
+
+Los audios de la sesión activa se conservan hasta pulsar `Nuevo álbum / Limpiar`.
+Los previews y temporales huérfanos se eliminan automáticamente. Esta rutina nunca
+recorre `exports/` ni borra presets.
 
 ## Requisito
 
@@ -47,6 +55,8 @@ El script descarga FFmpeg, crea un entorno aislado con PyInstaller y produce
 `release\GeViMastering-portable.zip`. Si Inno Setup 6 está instalado también genera
 `release\GeViMastering-Setup.exe`. El usuario final sólo necesita descomprimir el ZIP
 y abrir `GeViMastering.exe`, o ejecutar el instalador; no necesita Python ni FFmpeg.
+La versión empaquetada se abre en una ventana nativa de Windows y mantiene una sola
+instancia activa; un segundo lanzamiento enfoca la ventana existente.
 
 En la versión empaquetada, configuración, historial y caché se guardan en
 `%LOCALAPPDATA%\GeViMastering`, y los masters se exportan por defecto a

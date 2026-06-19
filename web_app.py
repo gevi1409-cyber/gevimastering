@@ -5,6 +5,7 @@ import hashlib
 import math
 import mimetypes
 import os
+import ctypes
 import re
 import shutil
 import subprocess
@@ -29,9 +30,10 @@ MEDIA = DATA / "media"
 PRESETS_FILE = DATA / "web-presets.json"
 HISTORY_FILE = DATA / "export-history.json"
 ANALYSIS_CACHE_FILE = DATA / "analysis-cache.json"
+SESSION_FILE = DATA / "session.json"
 EXPORTS = Path.home() / "Documents" / "GeViMastering" / "exports" if FROZEN else APP_ROOT / "exports"
 FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-DEFAULT_PRESETS = {
+DEFAULT_EQ_PRESETS = {
     "Plano": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     "Rock": [2, 1, 0, -1, -1, 0, 1, 2, 3, 2],
     "Hip-Hop": [4, 3, 2, 0, -1, 0, 1, 1, 2, 1],
@@ -44,10 +46,18 @@ DEFAULT_PRESETS = {
     "Graves cálidos": [3, 3, 2, 1, 0, 0, 0, 0, 0, 0],
     "Claridad vocal": [0, 0, -1, -1, 0, 1, 2, 2, 1, 0],
 }
+DEFAULT_PRESET = {
+    "preamp": 0, "eq": [0] * 10, "target_lufs": -10, "true_peak": -1,
+    "preview_start": 30, "compression": False,
+    "filename": {"track": True, "title": True, "album": False, "artist": False, "separator": " - "},
+}
+DEFAULT_PRESETS = {name: {**DEFAULT_PRESET, "eq": values} for name, values in DEFAULT_EQ_PRESETS.items()}
 JOB_LOCK = threading.Lock()
 ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
 CANCELLED_JOBS: set[str] = set()
 CACHE_LOCK = threading.Lock()
+SESSION_LOCK = threading.Lock()
+INSTANCE_MUTEX = None
 
 
 def find_binary(name: str) -> str | None:
@@ -128,17 +138,50 @@ def run_ffmpeg(args: list[str], job_id: str = "") -> subprocess.CompletedProcess
     return result
 
 
-def load_presets() -> dict[str, list[float]]:
+def normalize_preset(value: object) -> dict:
+    if isinstance(value, list):
+        value = {"eq": value}
+    if not isinstance(value, dict):
+        value = {}
+    eq = [max(-12.0, min(12.0, float(item))) for item in value.get("eq", [0] * 10)][:10]
+    if len(eq) != 10:
+        eq = [0.0] * 10
+    filename = value.get("filename", {})
+    if not isinstance(filename, dict):
+        filename = {}
+    separator = str(filename.get("separator", " - "))
+    if separator not in {" - ", "_", " "}:
+        separator = " - "
+    return {
+        "preamp": max(-12.0, min(12.0, float(value.get("preamp", 0)))),
+        "eq": eq,
+        "target_lufs": max(-16.0, min(-7.0, float(value.get("target_lufs", -10)))),
+        "true_peak": max(-3.0, min(-0.5, float(value.get("true_peak", -1)))),
+        "preview_start": max(0.0, float(value.get("preview_start", 30))),
+        "compression": bool(value.get("compression", False)),
+        "filename": {
+            "track": bool(filename.get("track", True)),
+            "title": bool(filename.get("title", True)),
+            "album": bool(filename.get("album", False)),
+            "artist": bool(filename.get("artist", False)),
+            "separator": separator,
+        },
+    }
+
+
+def load_presets() -> dict[str, dict]:
     custom = {}
     if PRESETS_FILE.exists():
         try:
             custom = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
-    return {**DEFAULT_PRESETS, **custom}
+    if not isinstance(custom, dict):
+        custom = {}
+    return {**DEFAULT_PRESETS, **{name: normalize_preset(value) for name, value in custom.items()}}
 
 
-def save_presets(presets: dict[str, list[float]]) -> None:
+def save_presets(presets: dict[str, dict]) -> None:
     DATA.mkdir(exist_ok=True)
     custom = {k: v for k, v in presets.items() if k not in DEFAULT_PRESETS}
     PRESETS_FILE.write_text(json.dumps(custom, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -160,17 +203,90 @@ def add_history_entry(entry: dict) -> list[dict]:
         "created_at": str(entry.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z")),
         "album": str(entry.get("album", "")).strip(),
         "artist": str(entry.get("artist", "")).strip(),
+        "metadata": entry.get("metadata") or load_session().get("metadata", {}),
         "format": str(entry.get("format", "")).lower(),
         "tracks": max(0, int(entry.get("tracks", 0))),
         "output_dir": str(entry.get("output_dir", "")),
         "outputs": [str(item) for item in entry.get("outputs", [])][:200],
         "settings": entry.get("settings", {}),
+        "filename": entry.get("filename") or load_session().get("filename", {}),
     }
     history.insert(0, clean)
     history = history[:50]
     DATA.mkdir(exist_ok=True)
     HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     return history
+
+
+def valid_uploaded_file(value: object, folder: str) -> Path | None:
+    if not value:
+        return None
+    try:
+        path = Path(str(value)).resolve()
+        root = (UPLOADS / folder).resolve()
+        return path if path.is_file() and path.is_relative_to(root) else None
+    except OSError:
+        return None
+
+
+def normalize_session(value: object) -> dict:
+    if not isinstance(value, dict):
+        value = {}
+    tracks = []
+    for index, item in enumerate(value.get("tracks", [])[:200]):
+        if not isinstance(item, dict):
+            continue
+        path = valid_uploaded_file(item.get("path"), "audio")
+        if not path:
+            continue
+        tracks.append({
+            "id": str(item.get("id") or f"restored-{index}"), "path": str(path),
+            "name": str(item.get("name") or path.name), "title": str(item.get("title") or path.stem),
+            "track": max(1, int(item.get("track", index + 1))),
+        })
+    cover = valid_uploaded_file(value.get("cover_path"), "covers")
+    metadata = value.get("metadata", {}) if isinstance(value.get("metadata"), dict) else {}
+    profile = normalize_preset({**(value.get("settings", {}) if isinstance(value.get("settings"), dict) else {}), "filename": value.get("filename", {})})
+    output_format = str(value.get("output_format", "wav")).lower()
+    return {
+        "tracks": tracks, "current_track_id": str(value.get("current_track_id", "")),
+        "cover_path": str(cover) if cover else "", "cover_name": str(value.get("cover_name", cover.name if cover else "")),
+        "metadata": {key: str(metadata.get(key, "")) for key in ("artist", "album", "date", "genre")},
+        "settings": {key: profile[key] for key in ("preamp", "eq", "target_lufs", "true_peak", "preview_start", "compression")},
+        "filename": profile["filename"], "output_dir": str(value.get("output_dir", EXPORTS)),
+        "output_format": output_format if output_format in {"wav", "flac", "mp3"} else "wav",
+    }
+
+
+def load_session() -> dict:
+    if not SESSION_FILE.exists():
+        return {}
+    try:
+        return normalize_session(json.loads(SESSION_FILE.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+def save_session(value: object) -> dict:
+    session = normalize_session(value)
+    DATA.mkdir(exist_ok=True)
+    with SESSION_LOCK:
+        temporary = SESSION_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(SESSION_FILE)
+    return session
+
+
+def clear_session() -> None:
+    with SESSION_LOCK:
+        SESSION_FILE.unlink(missing_ok=True)
+
+
+def session_file_paths() -> set[Path]:
+    session = load_session()
+    values = [item.get("path") for item in session.get("tracks", [])]
+    values.append(session.get("cover_path"))
+    return {Path(value).resolve() for value in values if value}
 
 
 def load_analysis_cache() -> dict:
@@ -270,8 +386,9 @@ def temporary_storage_info() -> dict:
     return {"files": files, "bytes": size}
 
 
-def cleanup_temporary_files(max_age_hours: float | None = None) -> dict:
+def cleanup_temporary_files(max_age_hours: float | None = None, preserve_session: bool = True) -> dict:
     cutoff = time.time() - max_age_hours * 3600 if max_age_hours is not None else None
+    protected = session_file_paths() if preserve_session else set()
     removed_files = 0
     removed_bytes = 0
     for root in (UPLOADS, MEDIA):
@@ -284,6 +401,8 @@ def cleanup_temporary_files(max_age_hours: float | None = None) -> dict:
             try:
                 resolved = path.resolve()
                 if not resolved.is_relative_to(resolved_root):
+                    continue
+                if resolved in protected:
                     continue
                 stat = resolved.stat()
                 if cutoff is not None and stat.st_mtime >= cutoff:
@@ -420,7 +539,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/state":
-            self.send_json({"presets": load_presets(), "history": load_history(), "output_dir": str(EXPORTS), "ffmpeg": bool(FFMPEG), "temporary": temporary_storage_info()})
+            self.send_json({"presets": load_presets(), "history": load_history(), "session": load_session(), "output_dir": str(EXPORTS), "ffmpeg": bool(FFMPEG), "temporary": temporary_storage_info()})
+            return
+        if parsed.path == "/session-cover":
+            cover = load_session().get("cover_path")
+            if cover:
+                self.serve_file(Path(cover))
+            else:
+                self.send_error(404)
             return
         if parsed.path.startswith("/media/"):
             self.serve_file(MEDIA / Path(parsed.path).name)
@@ -431,7 +557,8 @@ class Handler(BaseHTTPRequestHandler):
     def serve_file(self, path: Path) -> None:
         try:
             resolved = path.resolve()
-            if not resolved.is_file() or not (str(resolved).startswith(str(STATIC.resolve())) or str(resolved).startswith(str(MEDIA.resolve()))):
+            allowed = any(resolved.is_relative_to(root.resolve()) for root in (STATIC, MEDIA, UPLOADS))
+            if not resolved.is_file() or not allowed:
                 self.send_error(404)
                 return
             data = resolved.read_bytes()
@@ -468,8 +595,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/cleanup":
                 self.read_json()
-                result = cleanup_temporary_files()
+                clear_session()
+                result = cleanup_temporary_files(preserve_session=False)
                 self.send_json({"ok": True, **result})
+                return
+            if parsed.path == "/api/session":
+                session = save_session(self.read_json())
+                self.send_json({"ok": True, "session": session})
                 return
             if parsed.path == "/api/analyze":
                 body = self.read_json()
@@ -539,6 +671,18 @@ class Handler(BaseHTTPRequestHandler):
                 history = add_history_entry(body)
                 self.send_json({"ok": True, "history": history})
                 return
+            if parsed.path == "/api/open-folder":
+                body = self.read_json()
+                raw_path = str(body.get("path", "")).strip()
+                if not raw_path:
+                    raise ValueError("El historial no conserva una carpeta para esta exportación.")
+                path = Path(raw_path).expanduser()
+                target = path if path.is_dir() else path.parent
+                if not target.is_dir():
+                    raise ValueError("La carpeta ya no existe.")
+                os.startfile(str(target))
+                self.send_json({"ok": True, "path": str(target)})
+                return
             if parsed.path == "/api/select-output-dir":
                 body = self.read_json()
                 selected = select_output_directory(str(body.get("initial", "")))
@@ -560,11 +704,13 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/presets":
                 body = self.read_json()
                 name = str(body["name"]).strip()
-                values = [float(value) for value in body["values"]][:10]
-                if not name or len(values) != 10:
-                    raise ValueError("El preset necesita nombre y 10 bandas.")
+                if not name:
+                    raise ValueError("El preset necesita un nombre.")
+                if name in DEFAULT_PRESETS:
+                    raise ValueError("Elige otro nombre; los presets incluidos no se sobrescriben.")
+                profile = normalize_preset(body.get("profile", body.get("values", [])))
                 presets = load_presets()
-                presets[name] = values
+                presets[name] = profile
                 save_presets(presets)
                 self.send_json({"ok": True, "presets": presets})
                 return
@@ -587,8 +733,58 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+def claim_single_instance() -> bool:
+    global INSTANCE_MUTEX
+    if os.name != "nt" or not FROZEN or os.environ.get("GEVI_ALLOW_MULTIPLE") == "1":
+        return True
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.SetLastError(0)
+    INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "Local\\GeViMasteringDesktop")
+    if kernel32.GetLastError() != 183:
+        return True
+    user32 = ctypes.windll.user32
+    window = user32.FindWindowW(None, "GeVi Mastering")
+    if window:
+        user32.ShowWindow(window, 9)
+        user32.SetForegroundWindow(window)
+    kernel32.CloseHandle(INSTANCE_MUTEX)
+    INSTANCE_MUTEX = None
+    return False
+
+
+def run_native_window(server: ThreadingHTTPServer, url: str) -> bool:
+    try:
+        import webview
+    except ImportError:
+        return False
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        webview.create_window("GeVi Mastering", url, width=1440, height=920, min_size=(900, 650))
+        webview.start()
+    except Exception as exc:
+        try:
+            (DATA / "desktop-error.log").write_text(str(exc), encoding="utf-8")
+        except OSError:
+            pass
+        webbrowser.open(url)
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        cleanup_temporary_files()
+    return True
+
+
 def main() -> None:
     DATA.mkdir(exist_ok=True)
+    if not claim_single_instance():
+        return
     cleanup_temporary_files(max_age_hours=24)
     preferred_port = int(os.environ.get("GEVI_PORT", "8765"))
     try:
@@ -597,6 +793,8 @@ def main() -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://127.0.0.1:{server.server_port}"
     print(f"GeVi Mastering: {url}")
+    if FROZEN and os.environ.get("GEVI_NO_BROWSER") != "1" and run_native_window(server, url):
+        return
     if os.environ.get("GEVI_NO_BROWSER") != "1":
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
