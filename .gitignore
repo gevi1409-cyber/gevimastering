@@ -3,4 +3,7 @@ __pycache__/
 .suno-mastering/
 exports/
 tools/
+.build/
+.build-venv/
+release/
 
